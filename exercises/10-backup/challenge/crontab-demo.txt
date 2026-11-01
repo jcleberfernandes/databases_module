@@ -1,0 +1,6 @@
+# Igual a crontab.txt mas de 2 em 2 minutos, só para ver duas execuções rapidamente.
+# Instalar com:  crontab exercises/10-backup/challenge/crontab-demo.txt
+# Depois de ver o log, voltar à agenda diária:  crontab exercises/10-backup/challenge/crontab.txt
+PATH=/usr/local/bin:/usr/bin:/bin
+*/2 * * * *     bash /workspaces/databases_module/exercises/10-backup/challenge/backup.sh ex10 >> /workspaces/databases_module/backups/ex10/cron.log 2>&1
+1-59/2 * * * *  bash /workspaces/databases_module/exercises/10-backup/challenge/verify.sh ex10 >> /workspaces/databases_module/backups/ex10/cron.log 2>&1
