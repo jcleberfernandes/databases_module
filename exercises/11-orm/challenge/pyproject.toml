@@ -1,0 +1,11 @@
+[project]
+name = "ex11-challenge"
+version = "0.1.0"
+description = "Challenge 11: testes que contam queries"
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.3",
+    "python-dotenv>=1.0",
+    "pytest>=8",
+]
