@@ -1,0 +1,11 @@
+[project]
+name = "ex09-vulnerable-api"
+version = "0.1.0"
+description = "Exercício 09.2: mini-API com SQL injection e a correção"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.142",
+    "uvicorn[standard]>=0.54",
+    "psycopg[binary]>=3.3",
+    "python-dotenv>=1.0",
+]
