@@ -1,0 +1,9 @@
+[project]
+name = "ex04-challenge"
+version = "0.1.0"
+description = "Challenge 04: 1 milhão de alugueres com COPY"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.3",
+    "python-dotenv>=1.0",
+]
