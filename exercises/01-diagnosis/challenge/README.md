@@ -20,14 +20,14 @@ docker compose up -d --wait
 O script precisa do pacote `psycopg`, que já está nas dependências do FastAPI:
 
 ```bash
-cd exercises/ex01database-engines/individual/fastapi
-uv run python ../../challange/concurrent_writes.py
+cd exercises/01-diagnosis/exercise/fastapi
+uv run python ../../challenge/concurrent_writes.py
 ```
 
 Também é possível informar outro arquivo JSON:
 
 ```bash
-uv run python ../../challange/concurrent_writes.py --json-file /tmp/messages.json
+uv run python ../../challenge/concurrent_writes.py --json-file /tmp/messages.json
 ```
 
 ## Resultado esperado
@@ -43,3 +43,24 @@ substituem umas às outras.
 
 O script limpa a tabela `challenge_messages` antes de começar. Ela é uma tabela
 criada apenas para este desafio.
+
+## Resultado obtido
+
+```
+Esperado: 10000 registros
+JSON: 7 registros (erros de escrita: 0)
+PostgreSQL: 10000 registros
+```
+
+## Por que os números são diferentes
+
+No JSON, cada processo lê o arquivo inteiro, adiciona um registro e grava o
+arquivo inteiro de novo. Como os 10 processos fazem isso ao mesmo tempo, quase
+sempre um deles grava por cima do que outro acabou de gravar (e às vezes lê o
+arquivo pela metade e começa de uma lista vazia). Por isso sobraram só 7 dos
+10.000 registros.
+
+No PostgreSQL, cada `INSERT` só adiciona uma linha nova; ninguém reescreve a
+tabela inteira. O banco controla as escritas concorrentes (locks, transações e
+o WAL), então as 10 conexões não apagam o trabalho umas das outras e ficam
+exatamente os 10.000 registros.

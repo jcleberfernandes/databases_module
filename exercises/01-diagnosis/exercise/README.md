@@ -79,5 +79,5 @@ A explicação está no arquivo separado
 ## Challenge
 
 O script do desafio está na pasta
-[`challange`](../challange/), com instruções em
-[`challange/README.md`](../challange/README.md).
+[`challenge`](../challenge/), com instruções em
+[`challenge/README.md`](../challenge/README.md).
