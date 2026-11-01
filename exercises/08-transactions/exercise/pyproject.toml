@@ -1,0 +1,9 @@
+[project]
+name = "ex08-exercise"
+version = "0.1.0"
+description = "Exercício 08: transações e concorrência"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.3",
+    "python-dotenv>=1.0",
+]
