@@ -1,133 +1,160 @@
-# Runbook — Recuperar dados apagados do Pagila (exercício 10)
+# Runbook — Recuperar linhas apagadas de `payment`, `film_actor` e `film_category`
 
 ## Quando usar
 
-Alguém apagou linhas de uma ou mais tabelas (ex: `DELETE` sem o `WHERE` certo)
-e a base continua a funcionar. Não usar se a base inteira se perdeu (aí basta o passo 1 com `-d ex10`).
+Alguém apagou linhas de uma ou mais tabelas (um `DELETE` errado, um script mal corrido) e a base
+continua a funcionar. Este runbook recupera as linhas a partir do último backup **sem apagar nem
+recriar a base**, enquanto o resto da aplicação continua a usá-la.
+
+Não usar se a base inteira se perdeu: aí faz-se `createdb` + `pg_restore` do dump completo.
 
 ## Pré-requisitos
 
 - `docker compose ps` mostra o `postgres` como `healthy`.
-- Existe um dump em `backups/` (formato custom, `-Fc`).
-- Saber que tabelas foram afetadas (aqui: `payment`, `film_actor`, `film_category`).
+- Um dump em formato custom (`-Fc`) em `backups/`, de antes do incidente.
+- Saber que tabelas e que linhas foram afetadas. Aqui: `payment` com `payment_date >= '2026-01-01'`
+  (as partições `payment_p2026_01` a `payment_p2026_07`), `film_actor` com `actor_id <= 50` e
+  `film_category` com `category_id = 1`.
+- Avisar quem usa a base: durante o restore (menos de 1 s) estas tabelas estão vazias ou bloqueadas.
 
 ## Ficheiros
 
 | Ficheiro | Para quê |
 |---|---|
-| `counts.sql` | contar linhas das tabelas (antes/depois) |
-| `after_backup.sql` | simula a atividade da loja depois do backup |
-| `disaster.sql` | simula o script do formador (apaga dados de 3 tabelas) |
-| `recover.sh` | a recuperação (passos 1 a 4 abaixo) |
+| `activity.sql` | a atividade normal depois do backup (do enunciado) |
+| `disaster.sql` | o incidente (do enunciado) |
+| `counts.sql` | contar as linhas das 3 tabelas |
+| `lost.sql` | mostrar o que se perdeu (RPO) |
 
-## 0. Backup (no início)
+## Comandos, por ordem
+
+Na raiz do repositório. `P` é só um atalho para o `psql` da base `ex10`:
 
 ```bash
-./scripts/create-db.sh ex10 --pagila
+P() { docker compose exec -T postgres psql -U postgres -d ex10 "$@"; }
+```
+
+### 0. Preparar (só neste exercício)
+
+```bash
+./scripts/create-db.sh ex10 --pagila --reset
+```
+
+### 1. Contar as linhas
+
+```bash
+P < exercises/10-backup/exercise/counts.sql
+```
+```
+ payment | film_actor | film_category
+---------+------------+---------------
+   51061 |       5462 |          2367
+```
+
+### 2. Backup
+
+```bash
 mkdir -p backups
-docker compose exec -T postgres psql -U postgres -d ex10 < exercises/10-backup/exercise/counts.sql
-docker compose exec -T postgres pg_dump -U postgres -Fc ex10 > backups/ex10_$(date +%F_%H%M%S).dump
+date '+%F %T'                                  # 2026-11-05 11:53:18
+docker compose exec -T postgres pg_dump -U postgres -Fc ex10 > backups/ex10_$(date +%F_%H%M).dump
 ```
 
-```
- payment | film_actor | film_category | rental
----------+------------+---------------+--------
-   51061 |       5462 |          2367 |  51805
-```
+`backups/ex10_2026-11-05_1153.dump` (4,6 MB, 0,9 s).
 
-Backup: `backups/ex10_2026-11-01_184145.dump`, 4,6 MB, 2,7 s.
-
-## Depois do backup e o desastre
+### 3. A atividade e o incidente
 
 ```bash
-docker compose exec -T postgres psql -U postgres -d ex10 < exercises/10-backup/exercise/after_backup.sql
-docker compose exec -T postgres psql -U postgres -d ex10 < exercises/10-backup/exercise/disaster.sql
+P < exercises/10-backup/exercise/activity.sql     # INSERT 0 5
+P < exercises/10-backup/exercise/disaster.sql     # DELETE 5286, DELETE 1327, DELETE 149
+P < exercises/10-backup/exercise/counts.sql
+```
+```
+ payment | film_actor | film_category
+---------+------------+---------------
+   45780 |       4135 |          2218
 ```
 
-Atividade depois do backup: +5 linhas em `film_actor` (ator 1) e +2 pagamentos (um de 2022-12-31 e um de 2026-07-28).
+### 4. Restore (sem apagar a base)
 
-Desastre:
-
-```
-DELETE FROM payment WHERE payment_date < '2023-01-01';      -- DELETE 19071
-DELETE FROM film_actor WHERE actor_id <= 50;                -- DELETE 1332
-DELETE FROM film_category WHERE category_id IN (1, 2, 3);   -- DELETE 447
-```
-
-```
- payment | film_actor | film_category | rental
----------+------------+---------------+--------
-   31992 |       4135 |          1920 |  51805
-```
-
-## Recuperação
+Primeiro confirmar que as partições de 2026 estão vazias (não pode haver linhas novas que se
+repetissem com as do backup). Não pode aparecer nenhuma partição:
 
 ```bash
-time bash exercises/10-backup/exercise/recover.sh backups/ex10_2026-11-01_184145.dump
+P -c "SELECT tableoid::regclass, count(*) FROM payment WHERE payment_date >= '2026-01-01' GROUP BY 1"
 ```
 
-O que o script faz:
-
-1. **Restaura o dump numa base separada** (`ex10_restored`). Não se mexe na base em produção às cegas.
-   ```bash
-   docker compose exec -T postgres psql -U postgres -d postgres -c "CREATE DATABASE ex10_restored"
-   docker compose exec -T postgres pg_restore -U postgres -d ex10_restored --no-owner < backups/ex10_....dump
-   ```
-2. **Copia as 3 tabelas** do backup para um schema `recovery` em `ex10`:
-   ```bash
-   docker compose exec -T postgres psql -U postgres -d ex10 -c "CREATE TABLE recovery.film_actor (LIKE public.film_actor)"
-   docker compose exec -T postgres psql -U postgres -d ex10_restored -c "COPY (SELECT * FROM public.film_actor) TO STDOUT" \
-     | docker compose exec -T postgres psql -U postgres -d ex10 -c "COPY recovery.film_actor FROM STDIN"
-   ```
-   (igual para `payment` e `film_category`; `payment` é particionada, por isso usa-se `COPY (SELECT ...)`).
-3. **Insere só as linhas que faltam**, numa transação:
-   ```sql
-   INSERT INTO public.payment       SELECT * FROM recovery.payment       ON CONFLICT DO NOTHING;
-   INSERT INTO public.film_actor    SELECT * FROM recovery.film_actor    ON CONFLICT DO NOTHING;
-   INSERT INTO public.film_category SELECT * FROM recovery.film_category ON CONFLICT DO NOTHING;
-   ```
-   Assim os dados criados depois do backup que **não** foram apagados ficam intactos
-   (um `TRUNCATE` + restore da tabela apagava-os).
-4. Apaga o schema `recovery` e a base `ex10_restored`.
-
-**Tempo medido do restore: 10,5 s** (`real 0m10.473s`).
-
-## Verificação
+`film_actor` e `film_category` ainda têm parte das linhas. O plano é **esvaziá-las e carregá-las
+inteiras** do backup (nenhuma das duas mudou depois do backup, por isso não se perde nada).
+O `payment` está particionado: as linhas estão nas partições, e cada uma tem de ser nomeada;
+as de 2026 estão vazias, por isso basta carregá-las.
 
 ```bash
-docker compose exec -T postgres psql -U postgres -d ex10 < exercises/10-backup/exercise/counts.sql
+time ( P -v ON_ERROR_STOP=1 -c "TRUNCATE film_actor, film_category" && \
+  docker compose exec -T postgres pg_restore -U postgres -d ex10 --data-only --single-transaction \
+    -t film_actor -t film_category \
+    -t payment_p2026_01 -t payment_p2026_02 -t payment_p2026_03 -t payment_p2026_04 \
+    -t payment_p2026_05 -t payment_p2026_06 -t payment_p2026_07 \
+    < backups/ex10_2026-11-05_1153.dump )
 ```
 
+- `--data-only`: só os dados; as tabelas já existem.
+- `--single-transaction`: ou carrega tudo, ou nada.
+- Não usar `--clean -t film_actor`: tenta apagar e recriar a tabela e falha, porque as views `actor_info` e `film_list` dependem dela.
+
+**Tempo medido do restore (RTO real): 0,54 s** (`real 0m0.541s`).
+
+### 5. Verificar o restore
+
+```bash
+P < exercises/10-backup/exercise/counts.sql
 ```
- payment | film_actor | film_category | rental
----------+------------+---------------+--------
-   51062 |       5462 |          2367 |  51805
+```
+ payment | film_actor | film_category
+---------+------------+---------------
+   51061 |       5462 |          2367
 ```
 
-- `film_category` e `film_actor`: iguais ao backup.
-- `payment`: 51 061 do backup + 1 pagamento de 2026 criado depois do backup (não foi apagado, ficou).
+| | payment | film_actor | film_category |
+|---|---|---|---|
+| tarefa 1 (antes do incidente) | 51 061 | 5 462 | 2 367 |
+| tarefa 3 (depois do incidente) | 45 780 | 4 135 | 2 218 |
+| tarefa 5 (depois do restore) | **51 061** | **5 462** | **2 367** |
+
+As três tabelas voltaram às contagens da tarefa 1. Outras verificações úteis: a aplicação abre
+um filme com os seus atores; `SELECT count(*) FROM payment WHERE payment_date >= '2026-01-01'`
+dá 5 281: o `DELETE` apagou 5 286, dos quais 5 eram os pagamentos de `activity.sql`, que não estão no backup.
 
 ## O que se perdeu (RPO real)
 
-Tudo o que foi criado **depois do backup** e **apagado pelo desastre**:
+Tudo o que foi escrito **depois do backup** nas tabelas apagadas. Aqui: os **5 pagamentos de
+`activity.sql`** (1.99 cada, de 2026-07-30 12:00). Foram criados depois do backup e apagados pelo
+incidente (`payment_date >= '2026-01-01'`), por isso não estão em lado nenhum.
 
-| Tabela | Perdido |
-|---|---|
-| `film_actor` | 5 linhas (ator 1, filmes 990–994) |
-| `payment` | 1 pagamento de 9.99 de 2022-12-31 |
-| `film_category` | nada |
+```bash
+P < exercises/10-backup/exercise/lost.sql
+```
+```
+ rental_id | customer_id | amount |      payment_date
+-----------+-------------+--------+------------------------
+     87555 |         250 |   1.99 | 2026-07-30 12:00:00+00
+     87556 |         715 |   1.99 | 2026-07-30 12:00:00+00
+     87557 |         484 |   1.99 | 2026-07-30 12:00:00+00
+     87558 |         676 |   1.99 | 2026-07-30 12:00:00+00
+     87559 |           3 |   1.99 | 2026-07-30 12:00:00+00
+```
 
-O RPO real é o tempo entre o backup e o desastre: tudo o que foi escrito nesse
+(Os 5 alugueres mais recentes não têm o pagamento de 1.99 que o `activity.sql` lhes deu.)
+É por isso que as contagens voltam a ser as da tarefa 1 e não "tarefa 1 + 5". Estes 5 pagamentos
+têm de ser registados outra vez a partir de outra fonte (recibos, o sistema de pagamentos).
+
+O RPO real é o tempo entre o backup (11:53:18) e o incidente: tudo o que foi escrito nesse
 intervalo, nas tabelas afetadas, perdeu-se.
 
-## O que mudaria na estratégia
+## O que mudar na estratégia de backup
 
-- **Backups mais frequentes** (ex: de hora a hora) com retenção, para baixar o RPO (ver challenge).
-- **Arquivo de WAL + backup físico** para point-in-time recovery: voltar ao segundo antes do `DELETE`, RPO quase zero.
-- **Testar o restore automaticamente** (`verify.sh` do challenge), porque um backup nunca restaurado não é um backup.
-- **Copiar os dumps para fora da máquina** (outro disco/cloud): um volume Docker não é um backup.
-- **Menos permissões**: a aplicação não devia poder fazer `DELETE` em massa (roles do exercício 09).
-
-## Quem avisar
-
-O responsável pela base de dados e a equipa da aplicação, com a lista do que se perdeu (tabela acima).
+- **Backups mais frequentes**, automáticos e com retenção (ver o challenge): o RPO é, no máximo, o intervalo entre backups.
+- **Arquivo do WAL + backup físico** (point-in-time recovery): permite voltar ao segundo antes do
+  `DELETE`, e os 5 pagamentos não se perdiam (RPO de segundos).
+- **Testar o restore com regularidade**: um backup que nunca foi restaurado não se sabe se funciona.
+- **Copiar os backups para fora da máquina** (outro disco ou a cloud): um volume Docker não é um backup.
+- **Menos privilégios**: a aplicação não devia conseguir apagar milhares de linhas de uma vez (roles do exercício 09).
