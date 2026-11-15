@@ -1,0 +1,13 @@
+[project]
+name = "ch09-api"
+version = "0.1.0"
+description = "Challenge 09: a mesma API com utilizadores de privilégios diferentes"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "psycopg[binary]>=3.3",
+    "pymongo>=4.8",
+    "redis>=5.0",
+    "python-dotenv>=1.0",
+]

@@ -1,0 +1,3 @@
+# credenciais das duas instâncias: nunca fazer commit
+.env.a
+.env.b

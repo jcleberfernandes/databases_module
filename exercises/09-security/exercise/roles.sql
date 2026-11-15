@@ -1,25 +1,33 @@
--- Exercício 09.1: três roles em Pagila (base ex09, cópia de Pagila), como superuser
--- Os roles são do servidor inteiro: se já existirem, o CREATE dá erro e é ignorado.
--- As passwords definem-se à parte, no psql: \password app
+-- Exercício 09, tarefa 1: roles em ex09 (correr como postgres)
+-- As passwords vêm de variáveis de ambiente, passadas ao psql com -v (ver README):
+--   psql -v migrations_password=... -v app_password=... -v readonly_password=...
 
-DO $$ BEGIN CREATE ROLE migrations LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE app LOGIN;        EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE readonly LOGIN;   EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Os roles são do servidor inteiro: só se criam se ainda não existirem
+SELECT 'CREATE ROLE ex09_migrations LOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ex09_migrations') \gexec
+SELECT 'CREATE ROLE ex09_app LOGIN'        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ex09_app') \gexec
+SELECT 'CREATE ROLE ex09_readonly LOGIN'   WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ex09_readonly') \gexec
+ALTER ROLE ex09_migrations PASSWORD :'migrations_password';
+ALTER ROLE ex09_app        PASSWORD :'app_password';
+ALTER ROLE ex09_readonly   PASSWORD :'readonly_password';
 
--- migrations: dono da base, pode criar e alterar tabelas
-ALTER DATABASE ex09 OWNER TO migrations;
+-- ex09_migrations é o dono da base (cria e altera tabelas)
+ALTER DATABASE ex09 OWNER TO ex09_migrations;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE, CREATE ON SCHEMA public TO migrations;
+-- o schema public do Pagila é do postgres: ser dono da base não chega para criar tabelas nele
+GRANT USAGE, CREATE ON SCHEMA public TO ex09_migrations;
+GRANT USAGE ON SCHEMA public TO ex09_app, ex09_readonly;
 
--- app: só lê e escreve dados (não é dono de nada, não pode fazer DROP)
-GRANT USAGE ON SCHEMA public TO app, readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app;
+-- ex09_app: lê e escreve dados, mais nada
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ex09_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO ex09_app;
 
--- readonly: só lê
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO readonly;
+-- ex09_readonly: só lê
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ex09_readonly;
 
--- Tabelas que migrations criar no futuro recebem as mesmas permissões
-ALTER DEFAULT PRIVILEGES FOR ROLE migrations IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
-ALTER DEFAULT PRIVILEGES FOR ROLE migrations IN SCHEMA public GRANT USAGE ON SEQUENCES TO app;
-ALTER DEFAULT PRIVILEGES FOR ROLE migrations IN SCHEMA public GRANT SELECT ON TABLES TO readonly;
+-- tabelas (e sequências) que ex09_migrations criar mais tarde recebem as mesmas permissões
+ALTER DEFAULT PRIVILEGES FOR ROLE ex09_migrations IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ex09_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE ex09_migrations IN SCHEMA public
+    GRANT USAGE ON SEQUENCES TO ex09_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE ex09_migrations IN SCHEMA public
+    GRANT SELECT ON TABLES TO ex09_readonly;
