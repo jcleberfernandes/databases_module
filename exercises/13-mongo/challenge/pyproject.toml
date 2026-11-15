@@ -1,0 +1,10 @@
+[project]
+name = "ex13-challenge"
+version = "0.1.0"
+description = "Challenge 13: padrão bucket"
+requires-python = ">=3.12"
+dependencies = [
+    "pymongo>=4.8",
+    "psycopg[binary]>=3.3",
+    "python-dotenv>=1.0",
+]
