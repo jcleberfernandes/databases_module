@@ -1,132 +1,197 @@
-# Exercício 07 — Índices
+# Exercício 07 — Índices e otimização
 
-Ficheiros:
-- `create_big_rental.sql` — cria `big_rental` com 2 milhões de linhas (o script não vinha no repositório, por isso usei o SQL do tutorial).
-- `indexes.sql` — as 5 queries: plano antes, índice, plano depois.
+Ficheiros: `setup.sql` (a tabela `big_rental` do enunciado) e `indexes.sql` (os `CREATE INDEX` que ficaram).
 
 ```bash
-./scripts/create-db.sh ex07
-docker compose exec -T postgres psql -U postgres -d ex07 -v ON_ERROR_STOP=1 < exercises/07-indexes/exercise/create_big_rental.sql
+./scripts/create-db.sh ex07 --reset
+docker compose exec -T postgres psql -U postgres -d ex07 -v ON_ERROR_STOP=1 < exercises/07-indexes/exercise/setup.sql
+# medir as 5 queries com EXPLAIN (ANALYZE, BUFFERS), 3 vezes cada (mediana)
 docker compose exec -T postgres psql -U postgres -d ex07 -v ON_ERROR_STOP=1 < exercises/07-indexes/exercise/indexes.sql
+# medir outra vez
 ```
+
+Cada query foi corrida 3 vezes com `EXPLAIN (ANALYZE, BUFFERS)`; os tempos são a mediana do `Execution Time`.
 
 ## Resumo
 
-| # | Query | Índice | Antes | Depois |
-|---|---|---|---|---|
-| 1 | últimos 10 de um cliente | `(customer_id, rented_at DESC)` | 53.6 ms | 0.09 ms |
-| 2 | um aluguer pelo `id` | `UNIQUE (id)` | 56.3 ms | 0.05 ms |
-| 3 | por devolver há +30 dias | parcial `(rented_at) WHERE returned_at IS NULL` | 68.9 ms | 19.2 ms |
-| 4 | alugueres de 1 dia | `(rented_at)` | 35.3 ms | 3.4 ms |
-| 5 | últimos 2 anos (67% da tabela) | `(rented_at)` | 487 ms | **não ajuda** (forçado: 1698 ms) |
+| Query | Plano antes | Índice | Plano depois | Mediana antes | Mediana depois |
+|---|---|---|---|---|---|
+| Q1 | Parallel Seq Scan | `(customer_id) WHERE returned_at IS NULL` | **Index Only Scan** | 68.4 ms | 0.08 ms |
+| Q2 | Parallel Seq Scan + Sort | `(rented_at)` | **Bitmap Heap Scan** | 158.2 ms | 5.0 ms |
+| Q3 | Parallel Seq Scan | nenhum (como está escrita) | Parallel Seq Scan | 133.8 ms | 112.6 ms |
+| Q3 reescrita | — | `(rented_at)` | **Bitmap Heap Scan** | — | 5.1 ms |
+| Q4 | Parallel Seq Scan + GroupAggregate | nenhum | Parallel Seq Scan | 175.1 ms | 172.3 ms |
+| Q5 | Parallel Seq Scan + Sort | `(customer_id, rented_at)` | **Bitmap Heap Scan** (3 pesquisas no índice) | 73.6 ms | 1.9 ms |
 
-## Q1 — últimos 10 alugueres do cliente 42
-
-```sql
-SELECT * FROM big_rental WHERE customer_id = 42 ORDER BY rented_at DESC LIMIT 10;
-```
-
-Antes:
-```
-Limit (actual time=51.019..53.550 rows=10)
-  -> Gather Merge -> Sort (top-N heapsort)
-     -> Parallel Seq Scan on big_rental  Filter: (customer_id = 42)  Rows Removed by Filter: 665553
-Execution Time: 53.603 ms
-```
-
-Índice: `CREATE INDEX big_rental_customer_rented ON big_rental (customer_id, rented_at DESC);`
-
-Depois:
-```
-Limit (actual time=0.032..0.078 rows=10)
-  -> Index Scan using big_rental_customer_rented  Index Cond: (customer_id = 42)
-Execution Time: 0.089 ms
-```
-
-O índice já está ordenado por cliente e data, por isso o PostgreSQL lê só as 10 primeiras entradas em vez de ler os 2 milhões de linhas e ordenar.
-
-## Q2 — um aluguer pelo id
+## Q1
 
 ```sql
-SELECT * FROM big_rental WHERE id = 1234567;
+SELECT count(*) FROM big_rental WHERE customer_id = 42 AND returned_at IS NULL;
 ```
 
-Antes:
-```
-Gather -> Parallel Seq Scan on big_rental  Filter: (id = 1234567)  Rows Removed by Filter: 666666
-Execution Time: 56.309 ms
-```
+**O que devolve:** quantos alugueres do cliente 42 ainda não foram devolvidos (93).
 
-Índice: `CREATE UNIQUE INDEX big_rental_id ON big_rental (id);`
-
-Depois:
+Antes (mediana 68.4 ms; 50.3, 68.4, 70.7):
 ```
-Index Scan using big_rental_id  Index Cond: (id = 1234567)  Buffers: shared read=4
-Execution Time: 0.047 ms
+Finalize Aggregate -> Gather -> Partial Aggregate
+  ->  Parallel Seq Scan on big_rental  (actual rows=31.00 loops=3)
+        Filter: ((returned_at IS NULL) AND (customer_id = 42))
+        Rows Removed by Filter: 666636
+        Buffers: shared hit=2868 read=9868
 ```
 
-A tabela foi criada com `CREATE TABLE AS`, sem chave primária; com o índice basta descer a árvore B (4 páginas) em vez de ler a tabela toda.
+Índice: `CREATE INDEX big_rental_open_customer ON big_rental (customer_id) WHERE returned_at IS NULL;`
 
-## Q3 — por devolver há mais de 30 dias
+Depois (mediana 0.08 ms):
+```
+  ->  Index Only Scan using big_rental_open_customer on big_rental  (actual rows=93.00 loops=1)
+        Heap Fetches: 0
+        Index Searches: 1
+```
+
+Sem índice, a tabela inteira (12 700 páginas) é lida para contar 93 linhas. O índice parcial só
+tem os ~3% de linhas por devolver; para contar basta percorrer as entradas do cliente 42 no
+índice, sem ir à tabela (Index Only Scan, `Heap Fetches: 0`).
+
+## Q2
 
 ```sql
-SELECT count(*) FROM big_rental WHERE returned_at IS NULL AND rented_at < now() - interval '30 days';
+SELECT * FROM big_rental WHERE rented_at >= now() - interval '1 day' ORDER BY rented_at;
 ```
 
-Antes:
-```
-Finalize Aggregate -> Gather -> Parallel Seq Scan  Filter: ((returned_at IS NULL) AND ...)  Rows Removed by Filter: 647186
-Execution Time: 68.925 ms
-```
+**O que devolve:** os alugueres das últimas 24 horas (~1 880), do mais antigo para o mais recente.
 
-Índice: `CREATE INDEX big_rental_open ON big_rental (rented_at) WHERE returned_at IS NULL;`
-
-Depois:
+Antes (mediana 158.2 ms):
 ```
-Aggregate -> Index Only Scan using big_rental_open  Heap Fetches: 0  Buffers: shared hit=1 read=161
-Execution Time: 19.154 ms
+Gather Merge
+  ->  Sort  (Sort Method: quicksort)
+        ->  Parallel Seq Scan on big_rental  (actual rows=626.67 loops=3)
 ```
 
-O índice parcial só guarda os ~3% de linhas por devolver: é pequeno (161 páginas) e chega para responder sem ler a tabela (Index Only Scan).
+Índice: `CREATE INDEX big_rental_rented_at ON big_rental (rented_at);`
 
-## Q4 — alugueres de um único dia
-
-```sql
-SELECT * FROM big_rental WHERE rented_at >= now() - interval '100 days' AND rented_at < now() - interval '99 days';
+Depois (mediana 5.0 ms):
+```
+  ->  Bitmap Heap Scan on big_rental  (actual rows=1879.00 loops=1)
+        ->  Bitmap Index Scan on big_rental_rented_at  (actual rows=1879.00 loops=1)
 ```
 
-Antes (só existia o índice da Q1, que começa por `customer_id`):
-```
-Bitmap Heap Scan -> Bitmap Index Scan on big_rental_customer_rented  Index Searches: 601
-Execution Time: 35.324 ms
-```
+O índice encontra logo o intervalo do último dia (0,1% da tabela) e só essas páginas são lidas,
+em vez de ler 2 milhões de linhas e ordenar as que sobram.
 
-Índice: `CREATE INDEX big_rental_rented ON big_rental (rented_at);`
-
-Depois:
-```
-Bitmap Heap Scan -> Bitmap Index Scan on big_rental_rented  Index Searches: 1
-Execution Time: 3.417 ms
-```
-
-Antes o PostgreSQL 18 usava o índice da Q1 com *skip scan* (601 pesquisas, uma por cliente); com um índice que começa por `rented_at` basta 1 pesquisa.
-
-## Q5 — últimos 2 anos: o índice NÃO resolve
+## Q3 — o índice não ajuda tal como está escrita
 
 ```sql
-SELECT * FROM big_rental WHERE rented_at > now() - interval '730 days';
+SELECT * FROM big_rental WHERE rented_at::date = current_date - 10;
 ```
 
-Com o índice `big_rental_rented` já criado, o planner escolhe na mesma:
+**O que devolve:** os alugueres feitos há exatamente 10 dias (1 869).
+
+Antes (mediana 133.8 ms):
 ```
-Seq Scan on big_rental  rows=1334082  Rows Removed by Filter: 665918
-Execution Time: 487.092 ms
+  ->  Parallel Seq Scan on big_rental  (actual rows=623.00 loops=3)
+        Filter: ((rented_at)::date = (CURRENT_DATE - 10))
 ```
 
-Forçando o índice (`SET enable_seqscan = off; SET enable_bitmapscan = off;`):
+Com o índice `(rented_at)` já criado, o plano é **o mesmo** (mediana 112.6 ms):
 ```
-Index Scan using big_rental_rented  rows=1334081  Buffers: shared hit=1333976 read=3648
-Execution Time: 1698.153 ms
+  ->  Parallel Seq Scan on big_rental  (actual rows=623.00 loops=3)
 ```
 
-A query devolve 67% da tabela: com o índice o PostgreSQL faz um acesso à tabela por linha (1,3 milhões de leituras de páginas), enquanto o Seq Scan lê cada página uma só vez em sequência. Quando se pede quase tudo, nenhum índice ajuda; só ajudaria pedir menos linhas (ex: `LIMIT`) ou menos colunas.
+Porquê: o índice está ordenado por `rented_at`, mas o `WHERE` compara `rented_at::date`, o
+resultado de uma conversão. Para usar o índice, o PostgreSQL teria de converter todas as linhas
+primeiro. Um índice na própria expressão também não serve:
+
+```
+CREATE INDEX big_rental_rented_date ON big_rental ((rented_at::date));
+ERROR:  functions in index expression must be marked IMMUTABLE
+```
+
+A conversão de `timestamptz` para `date` depende do fuso horário da sessão, por isso não é `IMMUTABLE`.
+
+**Reescrita** (o mesmo dia como intervalo sobre a coluna, sem a converter):
+
+```sql
+SELECT * FROM big_rental
+WHERE rented_at >= (current_date - 10)::timestamptz AND rented_at < (current_date - 9)::timestamptz;
+```
+
+Devolve as mesmas 1 869 linhas e usa o índice (mediana 5.1 ms):
+```
+Bitmap Heap Scan on big_rental  (actual rows=1869.00 loops=1)
+  ->  Bitmap Index Scan on big_rental_rented_at  (actual rows=1869.00 loops=1)
+        Index Cond: ((rented_at >= ((CURRENT_DATE - 10))::timestamp with time zone) AND (rented_at < ((CURRENT_DATE - 9))::timestamp with time zone))
+```
+
+## Q4 — nenhum índice compensa
+
+```sql
+SELECT customer_id, count(*) FROM big_rental WHERE returned_at IS NOT NULL GROUP BY customer_id;
+```
+
+**O que devolve:** para cada um dos 600 clientes, quantos alugueres já devolveu.
+
+Antes (mediana 175.1 ms):
+```
+Finalize GroupAggregate -> Gather Merge -> Sort -> Partial HashAggregate
+  ->  Parallel Seq Scan on big_rental  (actual rows=646640.00 loops=3)
+```
+
+Experimentei `CREATE INDEX ... ON big_rental (customer_id) WHERE returned_at IS NOT NULL;`.
+O planner **continua a escolher o Seq Scan** (mediana 174.4 ms). Forçando o índice
+(`SET enable_seqscan = off`), fica um Parallel Index Only Scan com mediana 143.1 ms:
+
+```
+  ->  Parallel Index Only Scan using big_rental_returned_customer  (actual rows=646640.00 loops=3)
+        Heap Fetches: 0
+```
+
+A query precisa de **97% das linhas** (1,94 milhões). Seja pela tabela ou pelo índice, tem de as
+ler quase todas e agrupá-las; o índice só poupa um pouco, por ser mais estreito do que a tabela.
+Esse ganho não aparece sem forçar o planner, e o índice custa espaço e tempo em cada escrita
+(ver o custo de escrita abaixo). Por isso não o mantive. Para esta pergunta ser rápida era preciso
+outra abordagem, por exemplo guardar o resultado numa view materializada (sessão 06).
+
+## Q5
+
+```sql
+SELECT * FROM big_rental
+WHERE customer_id IN (7, 42, 99) AND rented_at >= now() - interval '30 days'
+ORDER BY rented_at DESC;
+```
+
+**O que devolve:** os alugueres dos últimos 30 dias dos clientes 7, 42 e 99 (295), do mais recente para o mais antigo.
+
+Antes (mediana 73.6 ms):
+```
+Gather Merge
+  ->  Sort  (Sort Method: quicksort)
+        ->  Parallel Seq Scan on big_rental  (actual rows=98.33 loops=3)
+```
+
+Índice: `CREATE INDEX big_rental_customer_rented ON big_rental (customer_id, rented_at);`
+
+Depois (mediana 1.9 ms):
+```
+  ->  Bitmap Heap Scan on big_rental  (actual rows=295.00 loops=1)
+        ->  Bitmap Index Scan on big_rental_customer_rented  (actual rows=295.00 loops=1)
+              Index Searches: 3
+```
+
+Coluna da igualdade (`customer_id`) primeiro, coluna do intervalo (`rented_at`) depois: o índice
+faz 3 pesquisas, uma por cliente, e em cada uma lê só os últimos 30 dias.
+
+## Custo de escrita
+
+`INSERT INTO big_rental SELECT g, 1, now(), NULL FROM generate_series(2000001, 2100000) g;`
+(100 000 linhas), com a tabela recriada pelo `setup.sql` antes de cada execução:
+
+| Tabela | Execuções | Mediana |
+|---|---|---|
+| sem índices | 106.4, 153.3, 136.4 ms | **136.4 ms** |
+| com os 3 índices de `indexes.sql` | 594.6, 647.9, 607.7 ms | **607.7 ms** |
+
+Com os 3 índices o `INSERT` é ~4,5× mais lento. Cada linha nova não é só escrita na tabela: é
+também inserida em cada índice, no sítio certo da árvore B. Isto é o custo dos índices: leituras
+muito mais rápidas, escritas mais lentas (e mais espaço). Por isso só se criam os índices que as
+queries medidas realmente usam.

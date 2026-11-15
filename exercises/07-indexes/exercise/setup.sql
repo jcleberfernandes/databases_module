@@ -1,5 +1,3 @@
--- Cria a tabela big_rental com 2 milhões de linhas (SQL do tutorial da sessão 07)
-DROP TABLE IF EXISTS big_rental;
 SELECT setseed(0.1);
 CREATE TABLE big_rental AS
 SELECT g AS id,
