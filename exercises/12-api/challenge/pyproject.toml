@@ -1,0 +1,14 @@
+[project]
+name = "ex12-challenge"
+version = "0.1.0"
+description = "Challenge 12: renomear uma coluna com expand e contract"
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.3",
+    "alembic>=1.13",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+]
