@@ -1,10 +1,15 @@
-"""Adiciona 1 milhão de alugueres ao Pagila com COPY.
+"""Adiciona 1 000 000 de alugueres ao Pagila com COPY.
 
-    uv run python seed.py ex04_seed_a
+    uv run python seed.py ch04_a
 
-A ligação usa o .env da raiz do repositório (POSTGRES_USER e POSTGRES_PASSWORD).
+- rental_id de 100 001 a 1 100 000 (iguais em todas as execuções); no fim, setval da sequência.
+- inventory_id, customer_id e staff_id escolhidos entre os que existem.
+- rental_date entre 2022-01-01 e 2026-07-31; return_date NULL ou depois de rental_date.
+- semente fixa: as duas bases ficam com as mesmas linhas.
+- idempotente: se as 1 000 000 linhas já existem, não faz nada.
 """
 
+import os
 import random
 import sys
 import time
@@ -12,18 +17,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
+
+load_dotenv()
+_root = dotenv_values(Path(__file__).resolve().parents[3] / ".env")
+POSTGRES_URL = os.environ.get("POSTGRES_URL") or (
+    f"postgresql://{_root['POSTGRES_USER']}:{_root['POSTGRES_PASSWORD']}@localhost:5432"
+)
 
 ROWS = 1_000_000
-FIRST_ID = 1_000_001  # ids reservados para o seed: assim sabemos o que já foi inserido
-START = datetime(2023, 1, 1, tzinfo=timezone.utc)
-LAST_UPDATE = "2026-01-01 00:00:00+00"
+FIRST_ID, LAST_ID = 100_001, 1_100_000
+START = datetime(2022, 1, 1, tzinfo=timezone.utc)
+END = datetime(2026, 7, 31, tzinfo=timezone.utc)
+SECONDS = int((END - START).total_seconds())
 
-env = dotenv_values(Path(__file__).resolve().parents[3] / ".env")
-db = sys.argv[1] if len(sys.argv) > 1 else "ex04"
-url = f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@localhost:5432/{db}"
-
-
+# Para carregar depressa: tirar as FKs e os índices secundários, inserir, voltar a criá-los.
+# Recriar um índice ou validar uma FK de uma vez é muito mais rápido do que linha a linha.
 DROP = [
     "ALTER TABLE rental DROP CONSTRAINT rental_customer_id_fkey",
     "ALTER TABLE rental DROP CONSTRAINT rental_inventory_id_fkey",
@@ -34,9 +43,11 @@ DROP = [
 ]
 CREATE = [
     "CREATE INDEX idx_fk_inventory_id ON rental (inventory_id)",
+    # o índice único volta a ser criado: se houvesse uma linha repetida, dava erro aqui
     "CREATE UNIQUE INDEX idx_unq_rental_rental_date_inventory_id_customer_id"
     " ON rental (rental_date, inventory_id, customer_id)",
     "CREATE UNIQUE INDEX rental_uuid_key ON rental (uuid)",
+    # ADD CONSTRAINT ... FOREIGN KEY verifica todas as linhas: um id que não existisse dava erro
     "ALTER TABLE rental ADD CONSTRAINT rental_customer_id_fkey FOREIGN KEY (customer_id)"
     " REFERENCES customer (customer_id) ON UPDATE CASCADE ON DELETE RESTRICT",
     "ALTER TABLE rental ADD CONSTRAINT rental_inventory_id_fkey FOREIGN KEY (inventory_id)"
@@ -47,34 +58,39 @@ CREATE = [
 
 
 def make_rows(inventory, customers, staff):
-    rnd = random.Random(42)  # semente fixa = mesmos dados em todas as execuções
-    for i in range(ROWS):
-        # +1 minuto por linha: (rental_date, inventory_id, customer_id) nunca se repete
-        rented = START + timedelta(minutes=i)
-        returned = rented + timedelta(hours=rnd.randint(1, 240))  # sempre depois do aluguer
-        yield (f"{FIRST_ID + i}\t{rented.isoformat()}\t{rnd.choice(inventory)}\t{rnd.choice(customers)}"
-               f"\t{returned.isoformat()}\t{rnd.choice(staff)}\t{LAST_UPDATE}\n")
+    rnd = random.Random(42)  # semente fixa
+    # segundos todos diferentes entre si; o ,500000 (meio segundo) evita coincidir com os
+    # alugueres que o Pagila já tem: assim o índice único nunca é violado
+    offsets = sorted(rnd.sample(range(SECONDS), ROWS))
+    for i, offset in enumerate(offsets):
+        rented = START + timedelta(seconds=offset, microseconds=500_000)
+        if rnd.random() < 0.02:
+            returned = r"\N"  # NULL no COPY: ainda não devolvido
+        else:
+            returned = (rented + timedelta(hours=rnd.randint(1, 240))).isoformat()
+        yield (f"{FIRST_ID + i}\t{rented.isoformat()}\t{rnd.choice(inventory)}\t"
+               f"{rnd.choice(customers)}\t{returned}\t{rnd.choice(staff)}\n")
 
 
+db = sys.argv[1]
 started = time.perf_counter()
-with psycopg.connect(url) as conn:
-    done = conn.execute("SELECT count(*) FROM rental WHERE rental_id >= %s", (FIRST_ID,)).fetchone()[0]
+with psycopg.connect(f"{POSTGRES_URL}/{db}") as conn:
+    done = conn.execute("SELECT count(*) FROM rental WHERE rental_id BETWEEN %s AND %s",
+                        (FIRST_ID, LAST_ID)).fetchone()[0]
     if done == ROWS:
-        print("Os dados já existem, nada a fazer.")
+        print(f"{db}: as {ROWS:,} linhas já existem, nada a fazer")
         sys.exit(0)
-    # Se uma execução anterior ficou a meio, apaga e começa de novo
-    conn.execute("DELETE FROM rental WHERE rental_id >= %s", (FIRST_ID,))
+    # se uma execução anterior ficou a meio, apaga e recomeça
+    conn.execute("DELETE FROM rental WHERE rental_id BETWEEN %s AND %s", (FIRST_ID, LAST_ID))
 
-    # Só ids que existem, ordenados para o resultado ser sempre igual
     inventory = [r[0] for r in conn.execute("SELECT inventory_id FROM inventory ORDER BY 1")]
     customers = [r[0] for r in conn.execute("SELECT customer_id FROM customer ORDER BY 1")]
     staff = [r[0] for r in conn.execute("SELECT staff_id FROM staff ORDER BY 1")]
 
-    # COPY para uma tabela temporária (sem índices nem FKs) é muito rápido...
+    # COPY para uma tabela temporária (sem índices nem FKs)...
     conn.execute("CREATE TEMP TABLE rental_seed (LIKE rental INCLUDING DEFAULTS) ON COMMIT DROP")
     with conn.cursor().copy(
-        "COPY rental_seed (rental_id, rental_date, inventory_id, customer_id, return_date, staff_id, last_update)"
-        " FROM STDIN"
+        "COPY rental_seed (rental_id, rental_date, inventory_id, customer_id, return_date, staff_id) FROM STDIN"
     ) as copy:
         batch = []
         for line in make_rows(inventory, customers, staff):
@@ -83,17 +99,13 @@ with psycopg.connect(url) as conn:
                 copy.write("".join(batch))
                 batch = []
         copy.write("".join(batch))
-    print(f"COPY: {time.perf_counter() - started:.1f} s")
 
-    # ...e depois um único INSERT ... SELECT passa tudo para rental.
-    # Truque clássico de carga em massa: tirar FKs e índices secundários, inserir, e voltar a criá-los.
-    # Recriar um índice ou validar uma FK de uma vez é muito mais rápido do que fazê-lo linha a linha.
-    # Tudo na mesma transação: se algo falhar, nada muda.
+    # ...e um só INSERT ... SELECT para rental, tudo na mesma transação
     for sql in DROP:
         conn.execute(sql)
     conn.execute("INSERT INTO rental SELECT * FROM rental_seed")
-    print(f"INSERT: {time.perf_counter() - started:.1f} s")
     for sql in CREATE:
-        conn.execute(sql)  # ADD CONSTRAINT ... FOREIGN KEY verifica todas as linhas: dados inválidos dão erro
+        conn.execute(sql)
+    conn.execute("SELECT setval('rental_rental_id_seq', (SELECT max(rental_id) FROM rental))")
     conn.commit()
-print(f"{ROWS:,} alugueres inseridos em {time.perf_counter() - started:.1f} s")
+print(f"{db}: {ROWS:,} alugueres inseridos em {time.perf_counter() - started:.1f} s")
