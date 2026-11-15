@@ -1,18 +1,17 @@
--- 5 INSERTs que têm de falhar (correr depois de schema.sql).
--- Sem ON_ERROR_STOP, para ver os 5 erros:
---   docker compose exec -T postgres psql -U postgres -d ex03 < exercises/03-ddl/exercise/invalid.sql
+-- 5 instruções que têm de falhar, cada uma por uma constraint diferente (correr depois de schema.sql)
+-- docker compose exec -T postgres psql -U postgres -d ex03 < exercises/03-ddl/exercise/invalid.sql
 
--- 1. CHECK book_year_check: ano fora do intervalo
-INSERT INTO book (isbn, title, year, publisher_id) VALUES ('9780000000001', 'Futuro', 3000, 1);
+-- copy_condition_check: 'broken' não é um estado válido de um exemplar
+INSERT INTO copy (barcode, book_id, condition) VALUES ('C-0099', 1, 'broken');
 
--- 2. UNIQUE book_isbn_key: ISBN repetido
-INSERT INTO book (isbn, title, year, publisher_id) VALUES ('9789720046710', 'Cópia', 2000, 1);
+-- book_author_book_id_author_order_key: o livro 2 já tem um autor na posição 1
+INSERT INTO book_author (book_id, author_id, author_order) VALUES (2, 1, 1);
 
--- 3. FOREIGN KEY loan_reader_id_fkey: leitor 999 não existe
-INSERT INTO loan (copy_id, reader_id, due_at) VALUES (2, 999, current_date + 14);
+-- loan_one_open_per_copy: o exemplar 3 já está num empréstimo aberto
+INSERT INTO loan (reader_id, copy_id) VALUES (1, 3);
 
--- 4. UNIQUE composto reservation_book_id_reader_id_reserved_at_key: reserva repetida
-INSERT INTO reservation (book_id, reader_id, reserved_at) VALUES (1, 2, '2026-10-02 10:00');
+-- book_publisher_id_fkey (ON DELETE RESTRICT): a editora 1 ainda tem livros
+DELETE FROM publisher WHERE publisher_id = 1;
 
--- 5. CHECK loan_check: data de entrega antes da data do empréstimo
-INSERT INTO loan (copy_id, reader_id, loaned_at, due_at) VALUES (2, 1, '2026-10-10', '2026-10-01');
+-- reader_email_key: já existe um leitor com este email
+INSERT INTO reader (card_number, name, email, phone, address) VALUES ('L-1003', 'Outra Ana', 'ana@mail.pt', '910000003', 'Rua C');
