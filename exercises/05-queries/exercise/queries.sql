@@ -1,45 +1,48 @@
--- Exercício 05: 10 perguntas de negócio em Pagila
--- ./scripts/create-db.sh ex05 --pagila
+-- Exercício 05: 10 perguntas de negócio em Pagila (sem window functions)
+-- ./scripts/create-db.sh ex05 --pagila --reset
 -- docker compose exec -T postgres psql -U postgres -d ex05 -v ON_ERROR_STOP=1 < exercises/05-queries/exercise/queries.sql
+-- Um filme pode ter várias categorias: nas perguntas por categoria conta em cada uma.
 
--- 1. Receita por categoria por mês
-SELECT c.name AS category,
-       date_trunc('month', p.payment_date)::date AS month,
-       sum(p.amount) AS revenue
+-- 1. Número de filmes por categoria, incluindo categorias sem filmes, mais filmes primeiro, depois por nome
+SELECT c.name AS category, count(fc.film_id) AS films
+FROM category c
+LEFT JOIN film_category fc ON fc.category_id = c.category_id
+GROUP BY c.category_id, c.name
+ORDER BY films DESC, c.name;
+
+-- 2. Receita por categoria por mês em 2025, por payment_date
+SELECT c.name AS category, date_trunc('month', p.payment_date)::date AS month, sum(p.amount) AS revenue
 FROM payment p
 JOIN rental r         ON r.rental_id = p.rental_id
 JOIN inventory i      ON i.inventory_id = r.inventory_id
 JOIN film_category fc ON fc.film_id = i.film_id
 JOIN category c       ON c.category_id = fc.category_id
+WHERE p.payment_date >= '2025-01-01' AND p.payment_date < '2026-01-01'
 GROUP BY c.name, month
-ORDER BY month, revenue DESC
-LIMIT 20;
+ORDER BY c.name, month;
 
--- 2. Top 5 clientes de cada loja (por valor gasto)
-WITH spent AS (
-    SELECT c.store_id, c.customer_id, c.first_name, c.last_name, sum(p.amount) AS total,
-           row_number() OVER (PARTITION BY c.store_id ORDER BY sum(p.amount) DESC, c.customer_id) AS pos
-    FROM customer c
-    JOIN payment p ON p.customer_id = c.customer_id
-    GROUP BY c.customer_id
-)
-SELECT store_id, pos, customer_id, first_name, last_name, total
-FROM spent
-WHERE pos <= 5
-ORDER BY store_id, pos;
-
--- 3. Filmes que nunca foram alugados
+-- 3. Filmes que nunca foram alugados, incluindo filmes sem nenhuma cópia
 SELECT f.film_id, f.title
 FROM film f
 WHERE NOT EXISTS (
     SELECT 1 FROM inventory i JOIN rental r ON r.inventory_id = i.inventory_id
     WHERE i.film_id = f.film_id
 )
-ORDER BY f.title;
+ORDER BY f.film_id;
 
--- 4. Pares de atores que entraram juntos em mais de 3 filmes (self join)
-SELECT a1.first_name || ' ' || a1.last_name AS actor_1,
-       a2.first_name || ' ' || a2.last_name AS actor_2,
+-- 4. Clientes que alugaram filmes das 5 classificações
+SELECT r.customer_id, c.first_name, c.last_name
+FROM rental r
+JOIN inventory i ON i.inventory_id = r.inventory_id
+JOIN film f      ON f.film_id = i.film_id
+JOIN customer c  ON c.customer_id = r.customer_id
+GROUP BY r.customer_id, c.first_name, c.last_name
+HAVING count(DISTINCT f.rating) = (SELECT count(DISTINCT rating) FROM film)
+ORDER BY r.customer_id;
+
+-- 5. Pares de atores que entraram juntos em mais de 3 filmes, cada par uma vez (self join)
+SELECT a1.actor_id AS actor_1, a1.first_name || ' ' || a1.last_name AS name_1,
+       a2.actor_id AS actor_2, a2.first_name || ' ' || a2.last_name AS name_2,
        count(*) AS films
 FROM film_actor fa1
 JOIN film_actor fa2 ON fa2.film_id = fa1.film_id AND fa2.actor_id > fa1.actor_id
@@ -49,68 +52,60 @@ GROUP BY a1.actor_id, a2.actor_id
 HAVING count(*) > 3
 ORDER BY films DESC, actor_1, actor_2;
 
--- 5. Clientes que gastam mais do que a média da sua cidade
-WITH customer_total AS (
-    SELECT c.customer_id, c.first_name, c.last_name, a.city_id, sum(p.amount) AS total
-    FROM customer c
-    JOIN address a ON a.address_id = c.address_id
-    JOIN payment p ON p.customer_id = c.customer_id
-    GROUP BY c.customer_id, a.city_id
-),
-city_avg AS (
-    SELECT city_id, avg(total) AS avg_total FROM customer_total GROUP BY city_id
+-- 6. Países com mais de 20 clientes: nº de clientes e total pago, mais clientes primeiro
+-- (os pagamentos são somados antes do join, para não contar cada cliente várias vezes)
+WITH customer_paid AS (
+    SELECT customer_id, sum(amount) AS paid FROM payment GROUP BY customer_id
 )
-SELECT ct.customer_id, ct.first_name, ct.last_name, ci.city, ct.total, round(ca.avg_total, 2) AS city_avg
-FROM customer_total ct
-JOIN city_avg ca ON ca.city_id = ct.city_id
-JOIN city ci     ON ci.city_id = ct.city_id
-WHERE ct.total > ca.avg_total
-ORDER BY ci.city, ct.total DESC;
-
--- 6. Número de filmes por categoria
-SELECT c.name, count(*) AS films
-FROM category c
-JOIN film_category fc ON fc.category_id = c.category_id
-GROUP BY c.name
-ORDER BY films DESC, c.name;
-
--- 7. Os 10 filmes mais alugados
-SELECT f.title, count(*) AS rentals
-FROM rental r
-JOIN inventory i ON i.inventory_id = r.inventory_id
-JOIN film f      ON f.film_id = i.film_id
-GROUP BY f.film_id
-ORDER BY rentals DESC, f.title
-LIMIT 10;
-
--- 8. Alugueres ainda não devolvidos, por cliente (top 10)
-SELECT c.customer_id, c.first_name, c.last_name, count(*) AS not_returned
-FROM rental r
-JOIN customer c ON c.customer_id = r.customer_id
-WHERE r.return_date IS NULL
-GROUP BY c.customer_id
-ORDER BY not_returned DESC, c.customer_id
-LIMIT 10;
-
--- 9. Atores que nunca entraram num filme da categoria Horror (subquery)
-SELECT a.actor_id, a.first_name, a.last_name
-FROM actor a
-WHERE a.actor_id NOT IN (
-    SELECT fa.actor_id
-    FROM film_actor fa
-    JOIN film_category fc ON fc.film_id = fa.film_id
-    JOIN category c       ON c.category_id = fc.category_id
-    WHERE c.name = 'Horror'
-)
-ORDER BY a.actor_id;
-
--- 10. Receita por país (top 10)
-SELECT co.country, sum(p.amount) AS revenue
-FROM payment p
-JOIN customer c ON c.customer_id = p.customer_id
-JOIN address a  ON a.address_id = c.address_id
+SELECT co.country, count(*) AS customers, coalesce(sum(cp.paid), 0) AS total_paid
+FROM customer cu
+JOIN address a  ON a.address_id = cu.address_id
 JOIN city ci    ON ci.city_id = a.city_id
 JOIN country co ON co.country_id = ci.country_id
+LEFT JOIN customer_paid cp ON cp.customer_id = cu.customer_id
 GROUP BY co.country
-ORDER BY revenue DESC
-LIMIT 10;
+HAVING count(*) > 20
+ORDER BY customers DESC, co.country;
+
+-- 7. Clientes que pagaram mais do que o cliente médio do seu país (sem pagamentos = 0)
+WITH customer_paid AS (
+    SELECT cu.customer_id, cu.first_name, cu.last_name, ci.country_id,
+           coalesce((SELECT sum(p.amount) FROM payment p WHERE p.customer_id = cu.customer_id), 0) AS paid
+    FROM customer cu
+    JOIN address a ON a.address_id = cu.address_id
+    JOIN city ci   ON ci.city_id = a.city_id
+),
+country_avg AS (
+    SELECT country_id, avg(paid) AS avg_paid FROM customer_paid GROUP BY country_id
+)
+SELECT cp.customer_id, cp.first_name, cp.last_name, co.country, cp.paid, round(ca.avg_paid, 2) AS country_avg
+FROM customer_paid cp
+JOIN country_avg ca ON ca.country_id = cp.country_id
+JOIN country co     ON co.country_id = cp.country_id
+WHERE cp.paid > ca.avg_paid
+ORDER BY co.country, cp.paid DESC, cp.customer_id;
+
+-- 8. Os filmes mais longos de cada classificação, com empates (subquery)
+SELECT f.rating, f.film_id, f.title, f.length
+FROM film f
+WHERE f.length = (SELECT max(f2.length) FROM film f2 WHERE f2.rating = f.rating)
+ORDER BY f.rating, f.title;
+
+-- 9. Clientes sem nenhum aluguer a partir de 2026-04-01
+SELECT c.customer_id, c.first_name, c.last_name
+FROM customer c
+WHERE NOT EXISTS (
+    SELECT 1 FROM rental r WHERE r.customer_id = c.customer_id AND r.rental_date >= '2026-04-01'
+)
+ORDER BY c.customer_id;
+
+-- 10. Por categoria, a média de dias que um filme fica fora (só alugueres devolvidos), maior primeiro
+SELECT c.name AS category,
+       round(avg(extract(epoch FROM r.return_date - r.rental_date) / 86400)::numeric, 2) AS avg_days_out
+FROM rental r
+JOIN inventory i      ON i.inventory_id = r.inventory_id
+JOIN film_category fc ON fc.film_id = i.film_id
+JOIN category c       ON c.category_id = fc.category_id
+WHERE r.return_date IS NOT NULL
+GROUP BY c.name
+ORDER BY avg_days_out DESC, c.name;
