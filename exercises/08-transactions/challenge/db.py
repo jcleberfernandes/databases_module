@@ -1,14 +1,10 @@
-import sys
+import os
 from pathlib import Path
 
-import psycopg
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
 
-# Usa POSTGRES_USER e POSTGRES_PASSWORD do .env da raiz do repositório
-env = dotenv_values(Path(__file__).resolve().parents[3] / ".env")
-DB = sys.argv[1] if len(sys.argv) > 1 else "ex08"
-URL = f"postgresql://{env['POSTGRES_USER']}:{env['POSTGRES_PASSWORD']}@localhost:5432/{DB}"
-
-
-def connect(**kwargs):
-    return psycopg.connect(URL, **kwargs)
+load_dotenv()
+_root = dotenv_values(Path(__file__).resolve().parents[3] / ".env")
+DATABASE_URL = os.environ.get("DATABASE_URL") or (
+    f"postgresql://{_root['POSTGRES_USER']}:{_root['POSTGRES_PASSWORD']}@localhost:5432/ch08"
+)

@@ -1,67 +1,124 @@
 # Challenge 08 — Fila de jobs em PostgreSQL
 
-Ficheiros: `job_queue.py`, `db.py`, `pyproject.toml`.
+Ficheiros: `producer.py`, `worker.py`, `db.py`, `setup.sql` (as tabelas do enunciado),
+`check.sql` (as queries da prova), `pyproject.toml`, `.env.example`.
+
+## Como correr
 
 ```bash
+./scripts/create-db.sh ch08 --reset
+docker compose exec -T postgres psql -U postgres -d ch08 -v ON_ERROR_STOP=1 < exercises/08-transactions/challenge/setup.sql
 cd exercises/08-transactions/challenge
-uv run python job_queue.py ex08 run    # tabela job, produtor de 10 000 jobs, 8 workers, verificação
-uv run python job_queue.py ex08 kill   # mata um worker a meio de um job
+uv run python producer.py                                   # 10 000 jobs {"n": 1..10000}
+for w in 1 2 3 4 5 6 7 8; do uv run python worker.py $w & done; wait    # 8 workers ao mesmo tempo
+cd ../../..
+docker compose exec -T postgres psql -U postgres -d ch08 < exercises/08-transactions/challenge/check.sql
 ```
 
-Cada worker (processo separado, `multiprocessing`) repete numa transação:
+Cada worker repete até não haver jobs pendentes. Numa transação:
 
 ```sql
-SELECT id, payload FROM job WHERE status = 'pending' ORDER BY id
-FOR UPDATE SKIP LOCKED LIMIT 1;
--- processa
-INSERT INTO job_log (job_id, worker) VALUES (...);
-UPDATE job SET status = 'done', done_by = ... WHERE id = ...;
+SELECT job_id, payload FROM job WHERE status = 'pending' ORDER BY job_id FOR UPDATE SKIP LOCKED LIMIT 1;
+-- dorme 1 a 5 ms
+INSERT INTO job_result (job_id, worker) VALUES (...);
+UPDATE job SET status = 'done' WHERE job_id = ...;
 COMMIT;
 ```
 
-`FOR UPDATE` bloqueia o job; `SKIP LOCKED` faz os outros workers saltarem os
-jobs bloqueados em vez de esperarem, por isso os 8 trabalham em paralelo sem
-pegar no mesmo job.
-
-## Prova: cada job processado exatamente uma vez
-
-`job_log` guarda uma linha por cada vez que um job é processado.
+## Tarefa 3 — cada job processado exatamente uma vez
 
 ```
-produtor: 10000 jobs inseridos
-worker 27493: 1249 jobs
-worker 27496: 1245 jobs
-worker 27501: 1245 jobs
-worker 27495: 1258 jobs
-worker 27504: 1240 jobs
-worker 27494: 1256 jobs
-worker 27503: 1255 jobs
-worker 27498: 1252 jobs
-8 workers terminaram em 12.9 s
-jobs=10000 done=10000 processados=10000 jobs_distintos=10000 repetidos=0
-cada job foi processado exatamente uma vez
+worker 1: 1263 jobs processados
+worker 8: 1220 jobs processados
+worker 3: 1259 jobs processados
+worker 4: 1219 jobs processados
+worker 7: 1257 jobs processados
+worker 6: 1258 jobs processados
+worker 2: 1257 jobs processados
+worker 5: 1267 jobs processados
+real	0m15.593s
 ```
 
-## Matar um worker a meio de um job
-
-Um worker lento (60 s por job) pega num job novo e é morto com `SIGKILL`:
+`check.sql`:
 
 ```
-novo job 10001
-worker 27805 a meio do job:   status=pending done_by=None livre_para_outro_worker=False job_log=[]
-worker 27805 morto (SIGKILL): status=pending done_by=None livre_para_outro_worker=True job_log=[]
-worker 27817: 1 jobs
-depois de outro worker:      status=done done_by=27817 livre_para_outro_worker=False job_log=[(27817,)]
-jobs=10001 done=10001 processados=10001 jobs_distintos=10001 repetidos=0
-cada job foi processado exatamente uma vez
+ jobs  | done  | results | distinct_jobs
+-------+-------+---------+---------------
+ 10000 | 10000 |   10000 |         10000
+
+-- jobs com mais de uma linha em job_result
+ job_id | count
+--------+-------
+(0 rows)
 ```
 
-O que acontece: enquanto o worker está vivo, o job está bloqueado e mais
-ninguém lhe pega. Quando o processo morre, a ligação cai e o PostgreSQL faz
-**rollback** da transação: o lock desaparece e o job continua `pending` (o
-`INSERT` em `job_log` também foi desfeito). O próximo worker pega nele e
-processa-o. O job não se perde nem é feito duas vezes.
+10 000 linhas em `job_result` e nenhum `job_id` repetido. O `FOR UPDATE` bloqueia o job reclamado
+e o `SKIP LOCKED` faz os outros workers saltarem os jobs bloqueados em vez de esperarem: cada job
+só é apanhado por um worker, e os 8 trabalham ao mesmo tempo (~1 250 jobs cada).
 
-Atenção: isto só é verdade porque o "processamento" está dentro da transação.
-Se o job fizesse algo fora da base de dados (ex: enviar um email), esse efeito
-podia acontecer duas vezes.
+## Tarefa 4 — matar o worker a meio de um job
+
+```bash
+uv run python producer.py --slow     # job 10001 com {"n": 0, "sleep": 30}: o worker dorme 30 s
+uv run python worker.py 9 &          # apanha o job 10001
+kill -9 <pid do worker 9>            # enquanto dorme
+uv run python worker.py 10
+```
+
+Durante o sono do worker 9:
+
+```
+ job_id | status  | results | by_worker
+--------+---------+---------+-----------
+  10001 | pending |       0 |
+
+ pid  |        state        |           last_query
+------+---------------------+---------------------------------
+ 5917 | idle in transaction | SELECT job_id, payload FROM job WHERE status = 'pending' ...
+
+ claimable          (outra sessão: SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)
+-----------
+(0 rows)
+```
+
+O job ainda está `pending` e sem resultado, mas a transação do worker 9 tem o **lock da linha**:
+outra sessão não o consegue reclamar (o `SKIP LOCKED` salta-o e não encontra mais nada).
+
+Depois do `kill -9`:
+
+```
+ job_id | status  | results | by_worker
+--------+---------+---------+-----------
+  10001 | pending |       0 |
+
+ pid | state | last_query
+-----+-------+------------
+(0 rows)
+
+ claimable
+-----------
+     10001
+```
+
+A ligação caiu e o PostgreSQL fez **rollback** da transação do worker 9: o lock desapareceu, o job
+continua `pending` e não ficou nenhuma linha em `job_result` (o `INSERT` nem chegou a ser feito, e
+seria desfeito na mesma). O job está livre outra vez.
+
+O worker 10 apanha-o:
+
+```
+worker 10: job 10001 vai demorar 30 s
+worker 10: 1 jobs processados
+
+ job_id | status | results | by_worker
+--------+--------+---------+-----------
+  10001 | done   |       1 | 10
+```
+
+**E se o processamento enviasse um email em vez de inserir uma linha?** O `INSERT` em
+`job_result` está dentro da transação, por isso é desfeito com ela: nunca fica feito "a meio". Um
+email não se desfaz. Se o worker enviasse o email e morresse antes do `COMMIT`, o job voltava a
+`pending` e outro worker enviava o email **outra vez**: o cliente recebia dois. A fila garante
+"pelo menos uma vez", não "exatamente uma vez", para efeitos fora da base de dados. Para evitar
+repetidos é preciso guardar uma marca de "email já enviado" (por exemplo uma chave de idempotência
+que o serviço de email aceite), ou registar o envio numa tabela e só enviar a partir dela.

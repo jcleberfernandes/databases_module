@@ -1,7 +1,7 @@
 [project]
-name = "ex08-challenge"
+name = "ch08"
 version = "0.1.0"
-description = "Challenge 08: fila de jobs"
+description = "Challenge 08: fila de jobs com SKIP LOCKED"
 requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.3",
