@@ -1,106 +1,92 @@
-# Exercício 11 — ORM (SQLAlchemy)
+# Exercício 11 — ORM (SQLAlchemy 2.0)
 
-Ficheiros:
-- `models.py` — 6 tabelas do Pagila com as relações.
-- `queries.py` — 3 queries do exercício 05 com o ORM, SQL gerado e comparação.
-- `n_plus_one.py` — N+1 de propósito, contagem, correção e nova contagem.
-- `db.py` — engine e contador de queries (evento `before_cursor_execute`); lê `POSTGRES_USER`/`POSTGRES_PASSWORD` do `.env` da raiz.
+Ficheiros: `models.py`, `queries.py`, `n_plus_one.py`, `pyproject.toml`.
 
 ```bash
-./scripts/create-db.sh ex11 --pagila
+./scripts/create-db.sh ex11 --pagila --reset
 cd exercises/11-orm/exercise
-uv run python queries.py
-uv run python n_plus_one.py
+uv run python queries.py        # tarefa 2 (echo=True: mostra o SQL que o ORM gera)
+uv run python n_plus_one.py     # tarefa 3
 ```
 
-## 1. Mapeamento de 6 tabelas
+A ligação vem de `DATABASE_URL`; sem `.env`, o `models.py` usa a password do `.env` da raiz.
 
-| Tabela | Classe | Relações |
+## 1. Modelos (`models.py`)
+
+As 6 tabelas, com `Mapped` e `mapped_column`:
+
+| Tabela | Mapeamento | Relações |
 |---|---|---|
 | `film` | `Film` | `language` (N:1), `actors` (N:N), `categories` (N:N) |
 | `language` | `Language` | `films` (1:N) |
 | `actor` | `Actor` | `films` (N:N) |
 | `category` | `Category` | `films` (N:N) |
-| `film_actor` | `Table` de ligação | liga `film` ↔ `actor` |
-| `film_category` | `Table` de ligação | liga `film` ↔ `category` |
+| `film_actor` | `Table` de ligação | `secondary` de `Film.actors` / `Actor.films` |
+| `film_category` | `Table` de ligação | `secondary` de `Film.categories` / `Category.films` |
 
-As tabelas de ligação só têm as duas chaves, por isso são `Table` e usadas em `relationship(secondary=...)`.
+## 2. As 3 queries: SQL escrito à mão e SQL gerado
 
-## 2. Três queries do exercício 05 com o ORM
+Os três dão as mesmas linhas:
 
-**Q6 — filmes por categoria**
-
-SQL à mão:
-```sql
-SELECT c.name, count(*) AS films
-FROM category c JOIN film_category fc ON fc.category_id = c.category_id
-GROUP BY c.name ORDER BY films DESC, c.name
 ```
-SQL gerado:
-```sql
-SELECT category.name, count(*) AS films
-FROM category JOIN film_category ON film_category.category_id = category.category_id
-GROUP BY category.name ORDER BY films DESC, category.name
-```
-Igual; o ORM usa o nome completo das tabelas em vez de aliases. 16 linhas nos dois.
-
-**Q4 — pares de atores com mais de 3 filmes juntos (self join)**
-
-SQL gerado:
-```sql
-SELECT actor_1.first_name || ' ' || actor_1.last_name AS actor_1,
-       actor_2.first_name || ' ' || actor_2.last_name AS actor_2, count(*) AS films
-FROM film_actor AS film_actor_1
-JOIN film_actor AS film_actor_2 ON film_actor_2.film_id = film_actor_1.film_id
-                               AND film_actor_2.actor_id > film_actor_1.actor_id
-JOIN actor AS actor_1 ON actor_1.actor_id = film_actor_1.actor_id
-JOIN actor AS actor_2 ON actor_2.actor_id = film_actor_2.actor_id
-GROUP BY actor_1.actor_id, actor_2.actor_id
-HAVING count(*) > 3 ORDER BY films DESC, actor_1, actor_2
-```
-Mesma estrutura que o SQL à mão; `aliased()` gera os aliases `film_actor_1`, `actor_1`, ... 143 linhas nos dois.
-
-**Q9 — atores que nunca entraram num filme de Horror (subquery)**
-
-SQL gerado:
-```sql
-SELECT actor.actor_id, actor.first_name, actor.last_name
-FROM actor
-WHERE (actor.actor_id NOT IN (SELECT film_actor.actor_id
-    FROM film_actor JOIN film_category ON film_category.film_id = film_actor.film_id
-    JOIN category ON category.category_id = film_category.category_id
-    WHERE category.name = 'Horror')) ORDER BY actor.actor_id
-```
-Igual ao SQL à mão (só parênteses a mais). 4 linhas nos dois.
-
-Saída do `queries.py`:
-```
---- linhas ORM=16  linhas SQL à mão=16  iguais=sim
---- linhas ORM=143  linhas SQL à mão=143  iguais=sim
---- linhas ORM=4  linhas SQL à mão=4  iguais=sim
+########## Q1: ORM 16 linhas, SQL 16 linhas, mesmas linhas: sim
+########## Q2: ORM 489 linhas, SQL 489 linhas, mesmas linhas: sim
+########## Q3: ORM 10 linhas, SQL 10 linhas, mesmas linhas: sim
 ```
 
-## 3. N+1 (filmes e os seus atores)
+### Q1 — filmes por categoria
 
-Antes — lazy loading, cada `film.actors` faz uma query:
+| SQL escrito à mão | SQL gerado pelo ORM (log do `echo=True`) |
+|---|---|
+| `SELECT c.name, count(*) AS films`<br>`FROM category c JOIN film_category fc ON fc.category_id = c.category_id`<br>`GROUP BY c.category_id, c.name`<br>`ORDER BY films DESC, c.name;` | `SELECT category.name, count(*) AS films`<br>`FROM category JOIN film_category ON film_category.category_id = category.category_id`<br>`GROUP BY category.category_id, category.name`<br>`ORDER BY films DESC, category.name` |
+
+Diferença: o ORM não usa aliases (`c`, `fc`); escreve o nome completo das tabelas. De resto é igual.
+
+### Q2 — filmes mais longos do que a média
+
+| SQL escrito à mão | SQL gerado pelo ORM |
+|---|---|
+| `SELECT f.film_id, f.title, f.length`<br>`FROM film f`<br>`WHERE f.length > (SELECT avg(length) FROM film)`<br>`ORDER BY f.length DESC, f.film_id;` | `SELECT film.film_id, film.title, film.length`<br>`FROM film`<br>`WHERE film.length > (SELECT avg(film.length) AS avg_1 FROM film)`<br>`ORDER BY film.length DESC, film.film_id` |
+
+Diferença: a subquery (`.scalar_subquery()`) ganha um alias automático (`avg_1`) e qualifica a
+coluna (`film.length`). O resultado é o mesmo.
+
+### Q3 — os 10 atores com mais filmes
+
+| SQL escrito à mão | SQL gerado pelo ORM |
+|---|---|
+| `SELECT a.actor_id, a.first_name, a.last_name, count(*) AS films`<br>`FROM actor a JOIN film_actor fa ON fa.actor_id = a.actor_id`<br>`GROUP BY a.actor_id`<br>`ORDER BY films DESC, a.actor_id`<br>`LIMIT 10;` | `SELECT actor.actor_id, actor.first_name, actor.last_name, count(*) AS films`<br>`FROM actor JOIN film_actor ON film_actor.actor_id = actor.actor_id`<br>`GROUP BY actor.actor_id`<br>`ORDER BY films DESC, actor.actor_id`<br>`LIMIT %(param_1)s::INTEGER` |
+
+Diferença: o `LIMIT 10` é enviado como **parâmetro** (`%(param_1)s`, com o valor 10 à parte), não
+escrito no SQL. O ORM faz isso com todos os valores, o que também protege contra SQL injection.
+
+## 3. N+1 — os primeiros 100 filmes e os seus atores
+
+Antes — lazy loading: cada `film.actors` faz uma query nova.
+
 ```python
-films = session.scalars(select(Film).order_by(Film.film_id).limit(50)).all()
-for f in films:
-    names = ", ".join(a.last_name for a in f.actors)
+for film in session.scalars(select(Film).order_by(Film.film_id).limit(100)):
+    names = ", ".join(f"{a.first_name} {a.last_name}" for a in film.actors)
 ```
-Depois — `selectinload` carrega os atores de todos os filmes de uma vez:
+
+Depois — `selectinload`, numa sessão nova (para nada vir já carregado da anterior):
+
 ```python
-stmt = select(Film).options(selectinload(Film.actors)).order_by(Film.film_id).limit(50)
+stmt = select(Film).order_by(Film.film_id).limit(100).options(selectinload(Film.actors))
 ```
 
+Os `SELECT` contados com o evento `before_cursor_execute`:
+
 ```
-ANTES  (lazy):        51 queries para 50 filmes
-  1.ª: SELECT film.film_id, film.title, film.length, film.rating, film.language_id ...
-  2.ª: SELECT actor.actor_id, actor.first_name, actor.last_name FROM actor, film_actor
-       WHERE %(param_1)s::INTEGER = film_actor.film_id AND actor.actor_id = film_actor.actor_id
-DEPOIS (selectinload): 2 queries para 50 filmes
-  SELECT film.film_id, film.title, ... FROM film ORDER BY film.film_id LIMIT ...
-  SELECT film_actor.film_id, actor.actor_id, ... FROM film_actor JOIN actor ON ... WHERE film_actor.film_id IN (...)
+ANTES (lazy loading):
+   último: BROOKLYN DESERT: JODIE DEGENERES, JAYNE NEESON, SEAN GUINESS, ALBERT NOLTE, GROUCHO WILLIAMS
+   101 SELECT para 100 filmes
+DEPOIS (selectinload):
+   último: BROOKLYN DESERT: JODIE DEGENERES, JAYNE NEESON, SEAN GUINESS, ALBERT NOLTE, GROUCHO WILLIAMS
+   2 SELECT para 100 filmes
+   SELECT film.film_id, film.title, film.length, film.language_id FROM film ORDER BY film.film_id LIMIT %(param_1)s::INTEGER
+   SELECT film_actor.film_id, actor.actor_id, actor.first_name, actor.last_name FROM film_actor JOIN actor ON actor.actor_id = film_actor.actor_id WHERE ...
 ```
 
-**51 → 2 queries.** Com N filmes, o lazy faz 1 + N queries; o `selectinload` faz sempre 2.
+**Antes: 101 queries** (1 para os filmes + 1 por filme). **Depois: 2** (os filmes, e todos os atores
+desses 100 filmes de uma vez, com `WHERE film_actor.film_id IN (...)`). O resultado é o mesmo.

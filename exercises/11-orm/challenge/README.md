@@ -1,21 +1,22 @@
-# Challenge 11 — Testes que contam queries
+# Challenge 11 — Teste automático contra o N+1
 
 Ficheiros:
-- `conftest.py` — fixtures `session`, `query_counter` (evento `before_cursor_execute`) e `assert_max_queries(n)` (context manager).
-- `test_films.py` — os testes.
-- Reutiliza `db.py` e `models.py` de `../exercise/`.
+- `tests/conftest.py` — as fixtures `engine`, `session`, `query_counter` (conta os SQL com o
+  evento `before_cursor_execute`) e `assert_max_queries(n)` (context manager).
+- `tests/test_queries.py` — o teste.
+- `films.py` — o código testado (`list_films`), com os modelos do exercício (`../exercise/models.py`).
+- `pyproject.toml`.
 
 ```bash
 cd exercises/11-orm/challenge
 uv run pytest -v
-uv run pytest --runxfail test_films.py::test_n_plus_one_is_caught   # ver o teste a falhar
 ```
 
 ## Fixture e helper
 
 ```python
 @pytest.fixture
-def query_counter():
+def query_counter(engine):
     statements = []
     def count(conn, cursor, statement, parameters, context, executemany):
         statements.append(statement)
@@ -29,43 +30,47 @@ def assert_max_queries(query_counter):
     def check(n):
         start = len(query_counter)
         yield
-        made = query_counter[start:]
-        assert len(made) <= n, f"{len(made)} queries (máximo {n}) ..."
+        ran = query_counter[start:]
+        assert len(ran) <= n, f"{len(ran)} statements ran (max {n}):\n" + ...
     return check
 ```
 
-## Testes
+## O teste
 
 ```python
 def test_list_100_films_with_actors_and_categories(session, assert_max_queries):
     with assert_max_queries(3):
-        films = list_films(session)            # selectinload(actors) + selectinload(categories)
-
-@pytest.mark.xfail(strict=True, reason="N+1 de propósito: o teste TEM de falhar")
-def test_n_plus_one_is_caught(session, assert_max_queries):
-    with assert_max_queries(3):
-        list_films(session, eager=False)       # sem selectinload -> N+1
+        films = list_films(session)      # selectinload(Film.actors), selectinload(Film.categories)
+    assert len(films) == 100
 ```
 
-`strict=True`: se o N+1 deixasse de ser apanhado, o teste passava e o pytest marcava-o como erro.
-
-## Resultado
+## `uv run pytest -v` — com eager loading (passa)
 
 ```
-test_films.py::test_list_100_films_with_actors_and_categories PASSED     [ 33%]
-test_films.py::test_counter_counts_queries PASSED                        [ 66%]
-test_films.py::test_n_plus_one_is_caught XFAIL (N+1 de propósito: o ...) [100%]
-========================= 2 passed, 1 xfailed in 0.60s =========================
+tests/test_queries.py::test_list_100_films_with_actors_and_categories PASSED [100%]
+============================== 1 passed in 0.20s ===============================
 ```
 
-Com o N+1 introduzido, o teste apanha-o (`--runxfail`):
+Com eager loading são 3 queries: os filmes, os atores dos 100 filmes e as categorias dos 100 filmes.
+
+## `uv run pytest -v` — sem eager loading (falha)
+
+Tirei a linha `.options(selectinload(Film.actors), selectinload(Film.categories))` de `films.py`:
 
 ```
-E       AssertionError: 201 queries (máximo 3):
-E         SELECT film.film_id, film.title, film.length, film.rating, film.language_id FROM film ORDER BY film.film_id LIMIT ...
-E         SELECT actor.actor_id, actor.first_name, actor.last_name FROM actor, film_actor WHERE %(param_1)s::INTEGER = film_actor. ...
-E         SELECT category.category_id, category.name FROM category, film_category WHERE %(param_1)s::INTEGER = film_category.film_ ...
-...
+tests/test_queries.py::test_list_100_films_with_actors_and_categories FAILED [100%]
+E       AssertionError: 201 statements ran (max 3):
+E         SELECT film.film_id, film.title, film.length, film.language_id FROM film ORDER BY film.film_id LIMIT %(param_1)s::INTEGE
+E         SELECT actor.actor_id, actor.first_name, actor.last_name FROM actor, film_actor WHERE %(param_1)s::INTEGER = film_actor.
+E         SELECT category.category_id, category.name FROM category, film_category WHERE %(param_1)s::INTEGER = film_category.film_
+E         SELECT actor.actor_id, actor.first_name, actor.last_name FROM actor, film_actor WHERE %(param_1)s::INTEGER = film_actor.
+E         SELECT category.category_id, category.name FROM category, film_category WHERE %(param_1)s::INTEGER = film_category.film_
+E         SELECT actor.actor_id, actor.first_name, actor.last_name FROM actor, film_actor WHERE %(param_1)s::INTEGER = film_actor.
+E         SELECT category.category_id, category.name FROM category, film_category WHERE %(param_1)s::INTEGER = film_category.film_
+E         ...
+FAILED tests/test_queries.py::test_list_100_films_with_actors_and_categories
+============================== 1 failed in 0.41s ===============================
 ```
 
-1 query para os filmes + 100 para os atores + 100 para as categorias = **201**; com `selectinload` são **3**.
+A mensagem mostra quantos SQL correram: **201** (1 para os filmes + 100 para os atores + 100 para
+as categorias, um por filme). Depois voltei a pôr o eager loading e o teste passa outra vez.

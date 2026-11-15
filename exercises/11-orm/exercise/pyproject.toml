@@ -1,5 +1,5 @@
 [project]
-name = "ex11-exercise"
+name = "ex11"
 version = "0.1.0"
 description = "Exercício 11: SQLAlchemy em Pagila"
 requires-python = ">=3.12"

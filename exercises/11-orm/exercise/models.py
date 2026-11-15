@@ -1,15 +1,30 @@
-"""6 tabelas do Pagila: film, language, actor, film_actor, category, film_category.
+"""As 6 tabelas do Pagila do exercício: film, language, actor, film_actor, category, film_category.
 Só as colunas que usamos; o SQLAlchemy ignora as outras."""
 
-from sqlalchemy import Column, ForeignKey, Table
+import os
+from pathlib import Path
+
+from dotenv import dotenv_values, load_dotenv
+from sqlalchemy import Column, ForeignKey, Table, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+load_dotenv()
+_root = dotenv_values(Path(__file__).resolve().parents[3] / ".env")
+DATABASE_URL = os.environ.get("DATABASE_URL") or (
+    f"postgresql+psycopg://{_root['POSTGRES_USER']}:{_root['POSTGRES_PASSWORD']}@localhost:5432/ex11"
+)
+
+
+def make_engine(echo: bool = True):
+    # echo=True escreve no terminal cada SQL que o ORM envia
+    return create_engine(DATABASE_URL, echo=echo)
 
 
 class Base(DeclarativeBase):
     pass
 
 
-# Tabelas de ligação N:N (só têm as duas chaves)
+# Tabelas de ligação N:N: só têm as duas chaves
 film_actor = Table(
     "film_actor",
     Base.metadata,
@@ -30,8 +45,7 @@ class Language(Base):
 
     language_id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str]
-    # 1:N  uma língua tem muitos filmes
-    films: Mapped[list["Film"]] = relationship(back_populates="language")
+    films: Mapped[list["Film"]] = relationship(back_populates="language")   # 1:N
 
 
 class Film(Base):
@@ -40,12 +54,9 @@ class Film(Base):
     film_id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str]
     length: Mapped[int | None]
-    rating: Mapped[str | None]
     language_id: Mapped[int] = mapped_column(ForeignKey("language.language_id"))
-    # N:1
-    language: Mapped[Language] = relationship(back_populates="films")
-    # N:N através de film_actor e film_category
-    actors: Mapped[list["Actor"]] = relationship(secondary=film_actor, back_populates="films")
+    language: Mapped[Language] = relationship(back_populates="films")                          # N:1
+    actors: Mapped[list["Actor"]] = relationship(secondary=film_actor, back_populates="films")  # N:N
     categories: Mapped[list["Category"]] = relationship(secondary=film_category, back_populates="films")
 
 
