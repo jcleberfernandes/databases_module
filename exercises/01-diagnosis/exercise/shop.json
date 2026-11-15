@@ -1,0 +1,18 @@
+{
+  "customers": [
+    {"id": 1, "name": "Ana Silva", "email": "ana@example.com", "city": "Porto"},
+    {"id": 2, "name": "Rui Costa", "email": "rui@example.com", "city": "Lisboa"}
+  ],
+  "orders": [
+    {"id": 1, "customer_id": 1, "customer_name": "Ana Silva", "customer_email": "ana@example.com",
+     "items": "Keyboard x1; Mouse x2", "total": "59.90", "date": "07/10/2026"},
+    {"id": 2, "customer_id": 3, "customer_name": "Marta Reis", "customer_email": "marta@example",
+     "items": "Monitor x1", "total": "abc", "date": "2026-10-08"},
+    {"id": 2, "customer_id": 1, "customer_name": "Ana Silva", "customer_email": "ana.silva@example.com",
+     "items": "Mouse x-1", "total": 12.5, "date": "08/10/2026"}
+  ],
+  "products": [
+    {"name": "Keyboard", "price": 29.90, "stock": 3},
+    {"name": "Mouse", "price": "15", "stock": -2}
+  ]
+}

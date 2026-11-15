@@ -1,66 +1,60 @@
-# Challenge — Escritas concorrentes
+# Challenge 01 — Escritas concorrentes: ficheiro JSON vs PostgreSQL
 
-Este desafio inicia 10 processos. Cada processo tenta adicionar 1.000
-registros:
+Ficheiros: `json_race.py`, `pg_race.py`, `pyproject.toml`, `.env.example`.
 
-1. Primeiro, os processos fazem leitura, adição e gravação no mesmo arquivo
-   `messages.json`.
-2. Depois, os processos usam conexões diferentes para inserir registros na
-   tabela `challenge_messages` do PostgreSQL.
-3. No fim, o programa conta os registros encontrados em cada lugar.
-
-## Como executar
-
-Na raiz do projeto, deixe os containers em execução:
+## Como correr
 
 ```bash
-docker compose up -d --wait
+./scripts/create-db.sh ch01
+cd exercises/01-diagnosis/challenge
+uv run python json_race.py     # começa sempre com records.json = []
+uv run python pg_race.py       # cria a tabela record se não existir e começa sempre com TRUNCATE
 ```
 
-O script precisa do pacote `psycopg`, que já está nas dependências do FastAPI:
+`pg_race.py` lê `DATABASE_URL` (ver `.env.example`); sem `.env`, usa a password do `.env` da raiz.
 
-```bash
-cd exercises/01-diagnosis/exercise/fastapi
-uv run python ../../challenge/concurrent_writes.py
-```
+- `json_race.py`: 10 processos (`multiprocessing`), cada um junta 1 000 registos
+  `{"worker": <processo>, "n": <0 a 999>}`, um de cada vez: lê o ficheiro inteiro, junta um,
+  escreve o ficheiro inteiro. Sem lock. Se ler JSON inválido (ficheiro a meio de ser escrito),
+  conta uma escrita falhada e continua.
+- `pg_race.py`: 10 processos, cada um com a sua ligação, cada um faz 1 000 `INSERT` (um por registo)
+  na tabela `record (worker integer NOT NULL, n integer NOT NULL)`.
 
-Também é possível informar outro arquivo JSON:
-
-```bash
-uv run python ../../challenge/concurrent_writes.py --json-file /tmp/messages.json
-```
-
-## Resultado esperado
-
-O total esperado é de 10.000 registros. O arquivo JSON normalmente terá menos
-registros, porque dois processos podem ler o mesmo conteúdo e um pode apagar a
-alteração feita pelo outro quando grava novamente. Em alguns casos, o arquivo
-também pode ficar inválido por causa de duas gravações ao mesmo tempo.
-
-O PostgreSQL deve terminar com 10.000 registros. Cada processo usa uma conexão
-separada e cada inserção é tratada pelo banco, por isso as gravações não
-substituem umas às outras.
-
-O script limpa a tabela `challenge_messages` antes de começar. Ela é uma tabela
-criada apenas para este desafio.
-
-## Resultado obtido
+## Resultados (3 execuções de cada)
 
 ```
-Esperado: 10000 registros
-JSON: 7 registros (erros de escrita: 0)
-PostgreSQL: 10000 registros
+== execução 1
+JSON: 76 registos no ficheiro (esperado 10000), 9582 escritas falhadas, ficheiro INVÁLIDO (lixo depois do carácter 1815)
+PostgreSQL: SELECT count(*) FROM record = 10000
+== execução 2
+JSON: 13 registos no ficheiro (esperado 10000), 9965 escritas falhadas, ficheiro INVÁLIDO (lixo depois do carácter 299)
+PostgreSQL: SELECT count(*) FROM record = 10000
+== execução 3
+JSON: 12 registos no ficheiro (esperado 10000), 9957 escritas falhadas, ficheiro INVÁLIDO (lixo depois do carácter 276)
+PostgreSQL: SELECT count(*) FROM record = 10000
 ```
 
-## Por que os números são diferentes
+| Execução | JSON | PostgreSQL |
+|---|---|---|
+| 1 | 76 | 10 000 |
+| 2 | 13 | 10 000 |
+| 3 | 12 | 10 000 |
 
-No JSON, cada processo lê o arquivo inteiro, adiciona um registro e grava o
-arquivo inteiro de novo. Como os 10 processos fazem isso ao mesmo tempo, quase
-sempre um deles grava por cima do que outro acabou de gravar (e às vezes lê o
-arquivo pela metade e começa de uma lista vazia). Por isso sobraram só 7 dos
-10.000 registros.
+Nas três execuções o ficheiro terminou **inválido**: duas escritas sobrepuseram-se e uma
+escrita mais curta deixou no fim os últimos caracteres de uma mais comprida (`...}]]`). O
+número de registos é o da lista válida que está no início do ficheiro.
 
-No PostgreSQL, cada `INSERT` só adiciona uma linha nova; ninguém reescreve a
-tabela inteira. O banco controla as escritas concorrentes (locks, transações e
-o WAL), então as 10 conexões não apagam o trabalho umas das outras e ficam
-exatamente os 10.000 registros.
+## Porque os números são diferentes
+
+No ficheiro JSON cada processo faz *ler – alterar – escrever* o ficheiro inteiro. Quando dois
+processos leem a mesma versão, cada um junta o seu registo em memória e escreve a sua versão: a
+última escrita apaga a do outro (**lost update**). Além disso, abrir o ficheiro para escrever
+apaga-o antes de escrever o novo conteúdo, por isso os outros processos leem muitas vezes um
+ficheiro vazio ou a meio — daí quase todas as escritas falharem — e duas escritas ao mesmo tempo
+podem misturar-se e corromper o ficheiro. O resultado muda de execução para execução porque
+depende de como o sistema operativo intercala os processos.
+
+O PostgreSQL não reescreve a tabela: cada `INSERT` só acrescenta uma linha nova, numa transação
+própria. O motor coordena as escritas concorrentes (cada transação vê um estado consistente, as
+linhas novas não se sobrepõem e o WAL garante que um `COMMIT` não se perde nem fica a meio), por
+isso as 10 000 inserções ficam todas, em todas as execuções.
