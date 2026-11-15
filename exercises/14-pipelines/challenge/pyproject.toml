@@ -1,0 +1,10 @@
+[project]
+name = "ex14-challenge"
+version = "0.1.0"
+description = "Challenge 14: relatório diário incremental com $merge"
+requires-python = ">=3.12"
+dependencies = [
+    "pymongo>=4.8",
+    "python-dotenv>=1.0",
+    "pytest>=8",
+]
